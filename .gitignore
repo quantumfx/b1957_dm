@@ -1,3 +1,13 @@
+*.o*
+*.e*
+dm_2014-06*/
+data/
+test/
+timing/
+potential_caustics/
+misc/
+hsiu-hsien-toa
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
