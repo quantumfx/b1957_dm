@@ -1,58 +1,45 @@
-from __future__ import division
+#from __future__ import division
 from scipy.optimize import minimize, fmin
 import numpy as np
 import sys
 
-# Nikhil's code, for the most part
 t = np.linspace(0,1,512,endpoint=False)#[:-1]
 t += (t[1] - t[0])/2
 ppdt = t[1] - t[0]
 
 # sum over polarizations
-#meanpp = np.load('timing/pp512.npy').mean(-1)
-highpp = np.load('timing/pphi512.npy').mean(-1)
-lowpp = np.load('timing/pplo512.npy').mean(-1)
+meanpp = np.load('timing/pp512.npy').mean(-1)
+highpp  = np.load('timing/pphi512.npy').mean(-1)
+lowpp   = np.load('timing/pplo512.npy').mean(-1)
 
-def pp_shift(dt, pp):
-    fpp = np.fft.rfft(pp,axis=0)
-    fshift = np.exp(-2*np.pi*1j*dt*np.fft.rfftfreq(512, ppdt))
-#     return np.fft.irfft(fpp*fshift[:, np.newaxis],axis=0) # summed over polarizations
-    return np.fft.irfft(fpp*fshift,axis=0)
+highpp_f = np.fft.rfft(highpp)
+lowpp_f  = np.fft.rfft(lowpp)
+freqs    = np.fft.rfftfreq(512, ppdt)
 
-def check_mode(p0, pp):
-    a, b, c= p0
-    cpp = a*lowpp + b*highpp + c
-    return ((pp - cpp)**2).sum()
+def off_gates(max_gate):
+    #compute relative off gates
+    #max_gate0 = highpp.argmax()
+    relative_offgates = np.concatenate( (np.arange(0,100), np.arange(290,400) ) ) + max_gate
+    print(max_gate)
+    return relative_offgates%512
 
-def chi_check_high(X, z, varpp, N):
+def chi_check_high_f(X, z_f, z_var):
+    dt, a = X
+    num   = (z_f - a * highpp_f * np.exp(-1j*2*np.pi*freqs*dt))[1:] # only consider k>0
+    chisq = np.sum( np.abs(num)**2 ) / (z_var * 256)
+    return chisq
+
+def chi_check_low_f(X, z_f, z_var):
+    dt, a = X
+    num   = (z_f - a * lowpp_f * np.exp(-1j*2*np.pi*freqs*dt))[1:] # only consider k>0
+    chisq = np.sum( np.abs(num)**2 ) / (z_var * 256)
+    return chisq
+
+def chi_check_mode_f(X, z_f, z_var):
     dt, a, b = X
-    model = a*highpp + b
-    model_shift = pp_shift(dt, model)
-    return (((z - model_shift)**2)/(varpp/N)).sum()
-
-def chi_check_low(X, z, varpp, N):
-    dt, a, b = X
-    model = a*lowpp + b
-    model_shift = pp_shift(dt, model)
-    return (((z - model_shift)**2)/(varpp/N)).sum()
-
-def chi_check_mode(X, z, varpp, N):
-    dt, a, b, c = X
-    model = a*lowpp + b*highpp + c
-    model_shift = pp_shift(dt, model)
-    return (((z - model_shift)**2)/(varpp/N)).sum()
-
-def find_chi_error_high(dt, p0, target, z, varpp, N):
-    chisq = chi_check_high(list(dt) + list(p0), z, varpp, N)
-    return (chisq - target)**2
-
-def find_chi_error_low(dt, p0, target, z, varpp, N):
-    chisq = chi_check_low(list(dt) + list(p0), z, varpp, N)
-    return (chisq - target)**2
-
-def find_chi_error_mode(dt, p0, target, z, varpp, N):
-    chisq = chi_check_mode(list(dt) + list(p0), z, varpp, N)
-    return (chisq - target)**2
+    num   = (z_f - (a * lowpp_f + b * highpp_f) * np.exp(-1j*2*np.pi*freqs*dt))[1:] # only consider k>0
+    chisq = np.sum( np.abs(num)**2 ) / (z_var * 256)
+    return chisq
 
 def which_mode(pnum, modes):
     if modes[pnum//583,0] > modes[pnum//583,1]:
@@ -73,77 +60,94 @@ def delay_to_dm(delay, error):
 
     print('Max delay within lowest band is '+format(2*bandwidth/f_central[0]*np.amax(delay),'.2f')+' us.')
 
-    dm = f_central**2/k_DM * delay * 1e-6 / 3.086e22 #pc/cm^3
-    ddm = f_central**2/k_DM * error *1e-6 / 3.086e22 #pc/cm^3
+    dm  = f_central**2/k_DM * delay * 1e-6 / 3.086e22 #pc/cm^3
+    ddm = f_central**2/k_DM * error * 1e-6 / 3.086e22 #pc/cm^3
 
-    dm = np.average(dm, weights = 1/ddm**2, axis=-1)
+    dm  = np.average(dm, weights = 1/ddm**2, axis=-1)
     #ddm = np.sqrt(np.sum(ddm**2, axis=-1) / 3) #unweighted
     ddm = 1/np.sqrt(np.sum(1/ddm**2,axis=-1))
 
     return dm, ddm
 
 def find_mode(data, bin_factor_modes = 583):
-    # bin the data in 1s, to find the modes
-    print('Folding '+format(bin_factor_modes,'03')+' pulses to find mode')
-    data_binned = data[: np.shape(data)[0]//bin_factor_modes * bin_factor_modes].reshape(-1,bin_factor_modes, 512, 3).mean(-1)
-    data_binned_var = np.var(data_binned, axis=1)
-    N = bin_factor_modes
-    data_binned = data_binned.sum(1)
+    # bin the data in ~1s, to find the modes
+    print('Folding '+format(bin_factor_modes,'03')+' pulses to find mode and max gates.')
+    data_binned = data[: np.shape(data)[0]//bin_factor_modes * bin_factor_modes].reshape(-1,bin_factor_modes, 512, 3)
+
+    #guessed offgates, taking into account delays
+    offgates = np.concatenate( (np.arange(50,100), np.arange(360,410)) )
+    data_binned_var = data_binned[:,:,offgates,:].var(axis=2).sum(1).sum(-1)/3
+
+    data_binned = data_binned.sum(1).mean(-1)
 
     mode_scale = np.zeros((np.shape(data_binned)[0],2))
-
+    max_gates  = np.zeros(np.shape(data_binned)[0], dtype=int)
     for j in range(np.shape(data_binned)[0]):
-        X_mode = fmin(chi_check_mode, x0=[0., 0.5, 0.5, 0.], args=(data_binned[j,:], data_binned_var[j,:], N), disp=0)
-        mode_scale[j,0] = X_mode[1]
-        mode_scale[j,1] = X_mode[2]
-    return mode_scale
+        z_f   = np.fft.rfft(data_binned[j,:])
+        z_var = data_binned_var[j]
+        dtmode, *p0mode = fmin(chi_check_mode_f, x0=[0., 0.5, 0.5], args=(z_f, z_var), disp = 0, maxiter = 1500, maxfun = 3000)
+        #X_mode = fmin(chi_check_mode_f, x0=[0., 0.5, 0.5, 0.], args=(data_binned[j,:], data_binned_var[j,:], N), disp=0)
+        mode_scale[j,0] = p0mode[0]
+        mode_scale[j,1] = p0mode[1]
+        max_gates[j] = int(dtmode*512)
+
+    return mode_scale, max_gates
 
 def fit_delay(bin_factor, data):
-    # print("Using Nikhil's code to fit DMs")
     print('Folding '+format(bin_factor,'04')+' pulses to find delays')
     print('Discarding', np.shape(data)[0]-np.shape(data)[0]//bin_factor * bin_factor, 'from', np.shape(data)[0], 'data points to fold into', np.shape(data)[0]//bin_factor, 'points.')
-    data_binned = data[: np.shape(data)[0]//bin_factor * bin_factor].reshape(-1,bin_factor, 512, 3)
-    data_binned_var = np.var(data_binned, axis=1)
-    N = bin_factor
-    data_binned = data_binned.sum(1)
+    data_binned_temp = data[: np.shape(data)[0]//bin_factor * bin_factor].reshape(-1,bin_factor, 512, 3)
+    #offgates = np.concatenate( np.arange(10,100), np.arange(310,410) )
+
+    data_binned = data_binned_temp.sum(1)
 
     delay = np.zeros((np.shape(data_binned)[0],3))
     error = np.zeros(np.shape(delay))
 
-    err_check = 0.00005
-
     for j in range(np.shape(data_binned)[0]):
         pnum = j*bin_factor
-        print(j, 'out of', np.shape(data_binned)[0], 'bin_factor', bin_factor, 'pnum', pnum)
+        #print(j, 'out of', np.shape(data_binned)[0], 'bin_factor', bin_factor, 'pnum', pnum)
         fitmode = which_mode(pnum, modes)
-        if fitmode == 'low' and bin_factor < 583:
-            fchi = chi_check_low
-            fchierr = find_chi_error_low
-            dof = 512 - 2
-            xguess = [0., 1., 0.]
-        elif fitmode == 'high' and bin_factor < 583:
-            fchi = chi_check_high
-            fchierr = find_chi_error_high
-            dof = 512 - 2
-            xguess = [0., 1., 0.]
-        else:
-            fchi = chi_check_mode
-            fchierr = find_chi_error_mode
-            dof = 512 - 3
-            xguess = [0., 0.5, 0.5, 0.]
-        print(fchi, dof)
-        for band in range(3):
-            X_mode, F_mode = fmin(fchi, x0=xguess, args=(data_binned[j,:,band], data_binned_var[j,:,band], N), full_output=True, disp=0,maxiter=1500,maxfun=3000)[:2]
-            dtmode = X_mode[0]
-            p0mode = X_mode[1:]
+        offgates = off_gates(max_gates[pnum//583])
+        #print(offgates)
+        #data_binned_var = data_binned_temp[j,:,offgates,:].var(axis=2).sum(1)
 
-            dterr0 = minimize(fchierr, x0=dtmode - err_check, args=(p0mode, F_mode * (1 + 1/dof), data_binned[j,:,band], data_binned_var[j,:,band], N), bounds=[(None,dtmode)], method='L-BFGS-B').x[0]
-            dterr1 = minimize(fchierr, x0=dtmode + err_check, args=(p0mode, F_mode * (1 + 1/dof), data_binned[j,:,band], data_binned_var[j,:,band], N), bounds=[(dtmode,None)], method='L-BFGS-B').x[0]
-            avg_err_mode = (dterr1 - dterr0)/2
+        if fitmode == 'low' and bin_factor < 583:
+            fchi = chi_check_low_f
+            pp_f = lowpp_f
+            dof = 512 - 2
+            xguess = [0., 1.]
+        elif fitmode == 'high' and bin_factor < 583:
+            fchi = chi_check_high_f
+            pp_f = highpp_f
+            dof = 512 - 2
+            xguess = [0., 1.]
+        else:
+            fchi = chi_check_mode_f
+            dof = 512 - 3
+            xguess = [0., 0.5, 0.5]
+        print('Using', fchi, 'with', dof, 'degrees of freedom.')
+        for band in range(3):
+            z_f   = np.fft.rfft(data_binned[j,:,band])
+            #print(data_binned_temp[j,:,offgates,band].shape)
+            #numpy funky dimension switching??? data_binned_temp[0,:,offgates,0] has dimension (offgates.size,data_binned_temp.shape[1])...
+            z_var = data_binned_temp[j,:,offgates,band].var(0).sum(0)
+            dtmode, p0mode = fmin(fchi, x0=xguess, args=(z_f, z_var), disp = 0, maxiter = 1500, maxfun = 3000)
+            # add offset
+            p0mode = np.append(p0mode, (z_f[0] - p0mode * pp_f[0]).real/512)
+            dterr = np.sqrt( (z_var*256)/p0mode[0] / np.sum( ((2*np.pi*freqs)**2*(z_f*pp_f.conj()*np.exp(1j*2*np.pi*freqs*dtmode)+z_f.conj()*pp_f*np.exp(-1j*2*np.pi*freqs*dtmode)))[1:] ).real )
+
+            #print(fchi((dtmode,p0mode[0]),np.fft.rfft(data_binned[j,:,band]+p0mode[1]),z_var))
+            #print(fchi((dtmode+dterr,p0mode[0]),np.fft.rfft(data_binned[j,:,band]+p0mode[1]),z_var))
 
             delay[j,band] = dtmode*1607
-            error[j,band] = np.abs(avg_err_mode)*1607
-        print(j, pnum, fitmode, delay[j], error[j])
+            error[j,band] = np.abs(dterr)*1607
+        #print('IF                 :', band)
+        print('Index              :', j)
+        print('Start pulse number :', pnum)
+        print('Bin factor         :', bin_factor)
+        print('Mode               :', fitmode)
+        print('Delay              :', delay[j], '+-', error[j])
     return delay, error
 
 if len(sys.argv) != 4:
@@ -183,7 +187,7 @@ for i in range(len(filelist)//3):
 
     pulsefile -= np.median(pulsefile, axis=1, keepdims=True)
 
-    modes = find_mode(pulsefile)
+    modes, max_gates = find_mode(pulsefile)
 
     delay, error = fit_delay(bin_factor, pulsefile)
     np.save(outfolder+'delay_'+format(bin_factor,'04')+'_'+timestamp, delay)
