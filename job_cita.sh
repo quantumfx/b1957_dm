@@ -6,10 +6,17 @@
  
 # load modules (must match modules used for compilation)
 module purge
-module load gcc/7.3.0 python/3.6.4
+#module load gcc/7.3.0 python/3.6.4
+module load intel/intel-18 python/3.6-mkl
  
 # DIRECTORY TO RUN - $PBS_O_WORKDIR is directory job was submitted from
 cd $PBS_O_WORKDIR
- 
-# EXECUTION COMMAND; python wholedaydm.py (pulses to fold) (data) (output folder)
-python3 fold_dm.py 40 filelist-2014-06-15-E1E2.txt dm_2014-06-15/40/
+filelist="filelist-2014-06-15-E1E2.txt"
+basefolder="dm_2014-06-15"
+bin_factor=$PBS_ARRAYID
+outfolder=$basefolder/$bin_factor\_ftfit/
+
+mkdir -p $outfolder
+
+# EXECUTION COMMAND; python fold_dm.py (pulses to fold) (data list) (output folder)
+python3 fold_dm.py $bin_factor $filelist $outfolder
