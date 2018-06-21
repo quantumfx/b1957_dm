@@ -8,13 +8,17 @@ t += (t[1] - t[0])/2
 ppdt = t[1] - t[0]
 
 # sum over polarizations
-meanpp = np.load('timing/pp512.npy').mean(-1)
+#meanpp = np.load('timing/pp512.npy').mean(-1)
 highpp  = np.load('timing/pphi512.npy').mean(-1)
 lowpp   = np.load('timing/pplo512.npy').mean(-1)
 
 highpp_f = np.fft.rfft(highpp)
 lowpp_f  = np.fft.rfft(lowpp)
 freqs    = np.fft.rfftfreq(512, ppdt)
+
+#import GP list
+egr1gp = np.load('GPlist/egr1GPlist.npy')
+egr2gp = np.load('GPlist/egr2GPlist.npy')
 
 def off_gates(max_gate):
     #compute relative off gates
@@ -73,12 +77,15 @@ def find_mode(data, bin_factor_modes = 583):
     # bin the data in ~1s, to find the modes
     print('Folding '+format(bin_factor_modes,'03')+' pulses to find mode and max gates.')
     data_binned = data[: np.shape(data)[0]//bin_factor_modes * bin_factor_modes].reshape(-1,bin_factor_modes, 512, 3)
-
     #guessed offgates, taking into account delays
     offgates = np.concatenate( (np.arange(50,100), np.arange(360,410)) )
-    data_binned_var = data_binned[:,:,offgates,:].var(axis=2).sum(1).sum(-1)/3
 
-    data_binned = data_binned.sum(1).mean(-1)
+    # warning caused by variance of offgates in GPs, all is okay
+    #data_binned_var = data_binned[:,:,offgates,:].var(axis=2).sum(1).sum(-1)/3
+    data_binned_var = np.nansum(np.nansum(np.nanvar(data_binned[:,:,offgates,:], 2), 1), -1)/3
+
+    #data_binned = data_binned.sum(1).mean(-1)
+    data_binned = np.nanmean(np.nansum(data_binned, 1), -1)
 
     mode_scale = np.zeros((np.shape(data_binned)[0],2))
     max_gates  = np.zeros(np.shape(data_binned)[0], dtype=int)
@@ -99,7 +106,8 @@ def fit_delay(bin_factor, data):
     data_binned_temp = data[: np.shape(data)[0]//bin_factor * bin_factor].reshape(-1,bin_factor, 512, 3)
     #offgates = np.concatenate( np.arange(10,100), np.arange(310,410) )
 
-    data_binned = data_binned_temp.sum(1)
+    #data_binned = data_binned_temp.sum(1)
+    data_binned = np.nansum(data_binned_temp, 1)
 
     delay = np.zeros((np.shape(data_binned)[0],3))
     error = np.zeros(np.shape(delay))
@@ -131,7 +139,8 @@ def fit_delay(bin_factor, data):
             z_f   = np.fft.rfft(data_binned[j,:,band])
             #print(data_binned_temp[j,:,offgates,band].shape)
             #numpy funky dimension switching??? data_binned_temp[0,:,offgates,0] has dimension (offgates.size,data_binned_temp.shape[1])...
-            z_var = data_binned_temp[j,:,offgates,band].var(0).sum(0)
+            #z_var = data_binned_temp[j,:,offgates,band].var(0).sum(0)
+            z_var = np.nansum(np.nanvar(data_binned_temp[j,:,offgates,band], 0), 0)
             dtmode, p0mode = fmin(fchi, x0=xguess, args=(z_f, z_var), disp = 0, maxiter = 1500, maxfun = 3000)
             # add offset
             p0mode = np.append(p0mode, (z_f[0] - p0mode * pp_f[0]).real/512)
@@ -147,7 +156,9 @@ def fit_delay(bin_factor, data):
         print('Start pulse number :', pnum)
         print('Bin factor         :', bin_factor)
         print('Mode               :', fitmode)
-        print('Delay              :', delay[j], '+-', error[j])
+        print('Delay IF0          :', delay[j,0], '+-', error[j,0])
+        print('Delay IF1          :', delay[j,1], '+-', error[j,1])
+        print('Delay IF2          :', delay[j,2], '+-', error[j,2])
     return delay, error
 
 if len(sys.argv) != 4:
@@ -177,7 +188,7 @@ if len(filelist)%3 != 0:
 for i in range(len(filelist)//3):
 
     #print(filelist.splitlines()[3*timestamp+0], filelist.splitlines()[3*timestamp+1], filelist.splitlines()[3*timestamp+2],)
-    timestamp = filelist[3*i+0][-28:]
+    timestamp = filelist[3*i+0][-28:-9]
     print('Processing '+timestamp)
 
     pulsefile = np.dstack( (np.load(nikdir+filelist[3*i+0]).mean(-1),
@@ -186,6 +197,14 @@ for i in range(len(filelist)//3):
     #print(np.shape(pulsefile))
 
     pulsefile -= np.median(pulsefile, axis=1, keepdims=True)
+
+    #ignore GPs, -1 to account for ignoring the first pulse:
+    if timestamp == '2014-06-15T06:36:50':
+        print('We\'re in egr1, ignoring GPs...')
+        pulsefile[egr1gp-1, ...] = np.nan
+    if timestamp == '2014-06-15T06:46:02':
+        print('We\'re in egr2, ignoring GPs...')
+        pulsefile[egr2gp-1, ...] = np.nan
 
     modes, max_gates = find_mode(pulsefile)
 
