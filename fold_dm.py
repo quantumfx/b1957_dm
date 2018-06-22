@@ -20,11 +20,12 @@ freqs    = np.fft.rfftfreq(512, ppdt)
 egr1gp = np.load('GPlist/egr1GPlist.npy')
 egr2gp = np.load('GPlist/egr2GPlist.npy')
 
+
 def off_gates(max_gate):
     #compute relative off gates
     #max_gate0 = highpp.argmax()
     relative_offgates = np.concatenate( (np.arange(0,100), np.arange(290,400) ) ) + max_gate
-    print(max_gate)
+    #print(max_gate)
     return relative_offgates%512
 
 def chi_check_high_f(X, z_f, z_var):
@@ -33,17 +34,44 @@ def chi_check_high_f(X, z_f, z_var):
     chisq = np.sum( np.abs(num)**2 ) / (z_var * 256)
     return chisq
 
+def chi_check_high_jac(X, z_f, z_var):
+    dt, a = X
+    num = (z_f * highpp_f.conj() * np.exp(1j*2*np.pi*freqs*dt)) # only consider k != 0
+    dchisqdt = -a*np.sum( (1j*2*np.pi*freqs*(num-num.conj())) ).real/(z_var*256)
+    dchisqda = np.sum( (2*a*highpp_f*highpp_f.conj() - num - num.conj())[1:] ).real / (z_var*256)
+    return np.array([dchisqdt, dchisqda])
+
 def chi_check_low_f(X, z_f, z_var):
     dt, a = X
     num   = (z_f - a * lowpp_f * np.exp(-1j*2*np.pi*freqs*dt))[1:] # only consider k>0
     chisq = np.sum( np.abs(num)**2 ) / (z_var * 256)
     return chisq
 
+def chi_check_low_jac(X, z_f, z_var):
+    dt, a = X
+    num = (z_f * lowpp_f.conj() * np.exp(1j*2*np.pi*freqs*dt)) # only consider k != 0
+    dchisqdt = -a*np.sum( (1j*2*np.pi*freqs*(num-num.conj())) ).real/(z_var*256)
+    dchisqda = np.sum( (2*a*lowpp_f*lowpp_f.conj() - num - num.conj())[1:] ).real / (z_var*256)
+    return np.array([dchisqdt, dchisqda])
+
 def chi_check_mode_f(X, z_f, z_var):
     dt, a, b = X
     num   = (z_f - (a * lowpp_f + b * highpp_f) * np.exp(-1j*2*np.pi*freqs*dt))[1:] # only consider k>0
     chisq = np.sum( np.abs(num)**2 ) / (z_var * 256)
     return chisq
+
+def multi_min(fun, x0, args, methods, jac, bounds):
+    fval = np.zeros(len(methods))
+    xmin = np.zeros((len(methods),len(x0)))
+    for i in range(len(methods)):
+        if jac:
+            out_full = minimize(fun = fun, x0 = x0, args = args, method = methods[i], jac = jac, bounds = bounds)
+        else:
+            out_full = minimize(fun = fun, x0 = x0, args = args, method = methods[i], bounds = bounds)
+        fval[i]   = out_full.fun
+        xmin[i,:] = out_full.x
+    #print('method:',methods[np.argmin(fval)])
+    return xmin[np.argmin(fval),:]
 
 def which_mode(pnum, modes):
     if modes[pnum//583,0] > modes[pnum//583,1]:
@@ -112,6 +140,10 @@ def fit_delay(bin_factor, data):
     delay = np.zeros((np.shape(data_binned)[0],3))
     error = np.zeros(np.shape(delay))
 
+    #minimization methods
+    methods = ['Nelder-Mead', 'L-BFGS-B', 'TNC', 'SLSQP']
+    bounds  = ((None,None),(0,None))
+
     for j in range(np.shape(data_binned)[0]):
         pnum = j*bin_factor
         #print(j, 'out of', np.shape(data_binned)[0], 'bin_factor', bin_factor, 'pnum', pnum)
@@ -122,26 +154,29 @@ def fit_delay(bin_factor, data):
 
         if fitmode == 'low' and bin_factor < 583:
             fchi = chi_check_low_f
+            fchi_jac = chi_check_low_jac
             pp_f = lowpp_f
             dof = 512 - 2
             xguess = [0., 1.]
         elif fitmode == 'high' and bin_factor < 583:
             fchi = chi_check_high_f
+            fchi_jac = chi_check_high_jac
             pp_f = highpp_f
             dof = 512 - 2
             xguess = [0., 1.]
         else:
             fchi = chi_check_mode_f
+            fchi_jac = False
             dof = 512 - 3
             xguess = [0., 0.5, 0.5]
         print('Using', fchi, 'with', dof, 'degrees of freedom.')
         for band in range(3):
             z_f   = np.fft.rfft(data_binned[j,:,band])
-            #print(data_binned_temp[j,:,offgates,band].shape)
             #numpy funky dimension switching??? data_binned_temp[0,:,offgates,0] has dimension (offgates.size,data_binned_temp.shape[1])...
             #z_var = data_binned_temp[j,:,offgates,band].var(0).sum(0)
             z_var = np.nansum(np.nanvar(data_binned_temp[j,:,offgates,band], 0), 0)
-            dtmode, p0mode = fmin(fchi, x0=xguess, args=(z_f, z_var), disp = 0, maxiter = 1500, maxfun = 3000)
+            #dtmode, p0mode = fmin(fchi, x0=xguess, args=(z_f, z_var), disp = 0, maxiter = 1500, maxfun = 3000)
+            dtmode, p0mode = multi_min(fun = fchi, x0 = xguess, jac = fchi_jac, args = (z_f, z_var), methods = methods, bounds = bounds)
             # add offset
             p0mode = np.append(p0mode, (z_f[0] - p0mode * pp_f[0]).real/512)
             dterr = np.sqrt( (z_var*256)/p0mode[0] / np.sum( ((2*np.pi*freqs)**2*(z_f*pp_f.conj()*np.exp(1j*2*np.pi*freqs*dtmode)+z_f.conj()*pp_f*np.exp(-1j*2*np.pi*freqs*dtmode)))[1:] ).real )
