@@ -70,7 +70,10 @@ def multi_min(fun, x0, args, methods, jac, bounds):
             out_full = minimize(fun = fun, x0 = x0, args = args, method = methods[i], bounds = bounds)
         fval[i]   = out_full.fun
         xmin[i,:] = out_full.x
-    #print('method:',methods[np.argmin(fval)])
+    print('method chosen:',methods[np.argmin(fval)], fval[np.argmin(fval)], xmin[np.argmin(fval)])
+    print('methods      :', methods)
+    print('fvals        :', fval)
+    print('xmins        :', xmin)
     return xmin[np.argmin(fval),:]
 
 def which_mode(pnum, modes):
@@ -81,6 +84,28 @@ def which_mode(pnum, modes):
     else:
         print('Fitting both modes... Check what\'s wrong')
         return 'mode'
+
+def tag_outliers(data, window_size, axis, sigma = 10):
+    from astropy.stats import median_absolute_deviation as mad
+    assert window_size%2 == 0
+
+    data_mad = np.zeros_like(data)
+    data_med = np.zeros_like(data)
+    #data_tag = np.zeros_like(data).astype(bool)
+
+    pad_width = np.zeros( (len(data.shape), 2) )
+    pad_width[axis] = (window_size//2, window_size//2)
+
+    data_pad = np.pad(data, pad_width, mode = 'constant', constant_values = np.nan)
+
+    # compute rolling MAD and median
+    for i in range(data_mad.shape[0]):
+        data_mad[i] = mad(data[i:i+window_size], axis = axis, ignore_nan = True)
+        data_med[i] = np.nanmedian(data[i:i+window_size], axis = axis)
+
+    # tag
+    data_tag = np.abs(data - data_med)/data_mad > sigma * 0.67449
+    return data_tag
 
 def delay_to_dm(delay, error):
     c = 299792458 #m/s
@@ -95,9 +120,15 @@ def delay_to_dm(delay, error):
     dm  = f_central**2/k_DM * delay * 1e-6 / 3.086e22 #pc/cm^3
     ddm = f_central**2/k_DM * error * 1e-6 / 3.086e22 #pc/cm^3
 
-    dm  = np.average(dm, weights = 1/ddm**2, axis=-1)
+    window_size = 208 #10s filter
+    delay_outliers = tag_outliers(delay, window_size, axis = 0, sigma = 10)
+
+    delay[delay_outliers] = np.nan
+
+    dm = np.nansum(dm/ddm**2, axis = -1) / np.nansum(1/ddm**2)
+    #dm  = np.average(dm, weights = 1/ddm**2, axis=-1)
     #ddm = np.sqrt(np.sum(ddm**2, axis=-1) / 3) #unweighted
-    ddm = 1/np.sqrt(np.sum(1/ddm**2,axis=-1))
+    ddm = 1/np.sqrt(np.nansum(1/ddm**2,axis=-1))
 
     return dm, ddm
 
@@ -121,6 +152,12 @@ def find_mode(data, bin_factor_modes = 583):
         z_f   = np.fft.rfft(data_binned[j,:])
         z_var = data_binned_var[j]
         dtmode, *p0mode = fmin(chi_check_mode_f, x0=[0., 0.5, 0.5], args=(z_f, z_var), disp = 0, maxiter = 1500, maxfun = 3000)
+        #constrain dtmode to be in [-1,1], then move in the direction closest to 0
+        dtmode = np.fmod(dtmode,1)
+        if dtmode > 0.5:
+            dtmode -= 1
+        if dtmode < -0.5:
+            dtmode += 1
         #X_mode = fmin(chi_check_mode_f, x0=[0., 0.5, 0.5, 0.], args=(data_binned[j,:], data_binned_var[j,:], N), disp=0)
         mode_scale[j,0] = p0mode[0]
         mode_scale[j,1] = p0mode[1]
@@ -141,7 +178,7 @@ def fit_delay(bin_factor, data):
     error = np.zeros(np.shape(delay))
 
     #minimization methods
-    methods = ['Nelder-Mead', 'L-BFGS-B', 'TNC', 'SLSQP']
+    methods = ['Nelder-Mead'] #'TNC'
     bounds  = ((None,None),(0,None))
 
     for j in range(np.shape(data_binned)[0]):
@@ -177,6 +214,13 @@ def fit_delay(bin_factor, data):
             z_var = np.nansum(np.nanvar(data_binned_temp[j,:,offgates,band], 0), 0)
             #dtmode, p0mode = fmin(fchi, x0=xguess, args=(z_f, z_var), disp = 0, maxiter = 1500, maxfun = 3000)
             dtmode, p0mode = multi_min(fun = fchi, x0 = xguess, jac = fchi_jac, args = (z_f, z_var), methods = methods, bounds = bounds)
+
+            #constrain dtmode to be in [-1,1], then move in the direction closest to 0
+            dtmode = np.fmod(dtmode,1)
+            if dtmode > 0.5:
+                dtmode -= 1
+            if dtmode < -0.5:
+                dtmode += 1
             # add offset
             p0mode = np.append(p0mode, (z_f[0] - p0mode * pp_f[0]).real/512)
             dterr = np.sqrt( (z_var*256)/p0mode[0] / np.sum( ((2*np.pi*freqs)**2*(z_f*pp_f.conj()*np.exp(1j*2*np.pi*freqs*dtmode)+z_f.conj()*pp_f*np.exp(-1j*2*np.pi*freqs*dtmode)))[1:] ).real )
@@ -194,6 +238,7 @@ def fit_delay(bin_factor, data):
         print('Delay IF0          :', delay[j,0], '+-', error[j,0])
         print('Delay IF1          :', delay[j,1], '+-', error[j,1])
         print('Delay IF2          :', delay[j,2], '+-', error[j,2])
+        print('------------------------------------------------------------\n')
     return delay, error
 
 if len(sys.argv) != 4:

@@ -14,9 +14,9 @@ cd $PBS_O_WORKDIR
 filelist="filelist-2014-06-15-E1E2.txt"
 basefolder="dm_2014-06-15"
 bin_factor=$PBS_ARRAYID
-outfolder=$basefolder/$bin_factor\_ftfit/
+outfolder=$basefolder/$bin_factor\_ftfit_multimin_NM/
 
 mkdir -p $outfolder
 
 # EXECUTION COMMAND; python fold_dm.py (pulses to fold) (data list) (output folder)
-python3 fold_dm.py $bin_factor $filelist $outfolder
+python3 fold_dm_nm.py $bin_factor $filelist $outfolder
